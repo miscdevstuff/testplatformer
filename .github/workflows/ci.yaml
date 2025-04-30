@@ -1,0 +1,107 @@
+name: Build APK
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.21"
+
+            - name: Set up Android SDK
+              uses: android-actions/setup-android@v3
+              with:
+                  ndk-version: "27.2.12479018"
+                  sdk-platform: "android-34"
+                  sdk-build-tools: "34.0.0"
+
+            - name: Build ARM libraries
+              run: |
+                  cd $GITHUB_WORKSPACE
+
+                  # ARMv7 (32-bit)
+                  GOOS=android GOARCH=arm GOARM=7 CGO_ENABLED=1 \
+                  CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi34-clang \
+                  CXX=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi34-clang++ \
+                  go build -tags=android -ldflags="-s -w" -o=libgame_arm.so ./cmd/game
+
+                  # ARM64 (64-bit)
+                  GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
+                  CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang \
+                  CXX=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang++ \
+                  go build -tags=android -ldflags="-s -w" -o=libgame_arm64.so ./cmd/game
+              shell: bash
+
+            - name: Package APK
+              run: |
+                  cd $GITHUB_WORKSPACE
+
+                  # Create proper APK structure
+                  mkdir -p android/lib/armeabi-v7a android/lib/arm64-v8a
+                  cp libgame_arm.so android/lib/armeabi-v7a/libgame.so
+                  cp libgame_arm64.so android/lib/arm64-v8a/libgame.so
+
+                  # Package
+                  $ANDROID_HOME/build-tools/34.0.0/aapt package -f \
+                    -M android/AndroidManifest.xml \
+                    -S android/res \
+                    -A android/assets \
+                    -I $ANDROID_HOME/platforms/android-34/android.jar \
+                    -F game.unsigned.apk \
+                    --ignore-assets ".*"
+
+                  # Add libraries (using full paths)
+                  cd android/
+                  $ANDROID_HOME/build-tools/34.0.0/aapt add ../game.unsigned.apk \
+                    lib/armeabi-v7a/libgame.so \
+                    lib/arm64-v8a/libgame.so
+              shell: bash
+
+            - name: Verify APK
+              run: |
+                  cd $GITHUB_WORKSPACE
+                  $ANDROID_HOME/build-tools/34.0.0/aapt list -v game.unsigned.apk
+                  $ANDROID_HOME/build-tools/34.0.0/aapt dump badging game.unsigned.apk
+
+            - name: ZipAlign APK
+              run: |
+                  cd $GITHUB_WORKSPACE
+                  # Sign with zipalign
+                  $ANDROID_HOME/build-tools/34.0.0/zipalign -v -p 4 game.unsigned.apk game-aligned.apk
+              shell: bash
+
+            - name: Fetch public keystore
+              run: wget https://github.com/tytydraco/public-keystore/raw/main/public.jks
+              shell: bash
+
+            - name: Sign APK
+              run: |
+                  cd $GITHUB_WORKSPACE
+                  $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+                    --ks public.jks \
+                    --ks-key-alias public \
+                    --ks-pass pass:public \
+                    --key-pass pass:public \
+                    --in game-aligned.apk \
+                    --out game.apk
+              shell: bash
+
+            - name: Inspect APK
+              run: |
+                  unzip -l game.apk
+                  $ANDROID_HOME/build-tools/34.0.0/aapt dump badging game.apk
+              shell: bash
+
+            - name: Upload APK
+              uses: actions/upload-artifact@v4
+              with:
+                  name: game-apk
+                  path: game.apk
